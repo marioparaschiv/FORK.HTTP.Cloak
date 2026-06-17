@@ -2,18 +2,18 @@
   "name": "httpcloak",
   "version": "1.6.8-beta.1",
   "description": "Browser fingerprint emulation HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support",
-  "main": "lib/index.js",
-  "module": "lib/index.mjs",
-  "types": "lib/index.d.ts",
+  "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
   "exports": {
     ".": {
       "import": {
-        "types": "./lib/index.d.ts",
-        "default": "./lib/index.mjs"
+        "types": "./index.d.ts",
+        "default": "./index.mjs"
       },
       "require": {
-        "types": "./lib/index.d.ts",
-        "default": "./lib/index.js"
+        "types": "./index.d.ts",
+        "default": "./index.js"
       }
     }
   },
