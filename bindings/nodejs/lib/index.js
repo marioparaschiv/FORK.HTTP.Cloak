@@ -2758,7 +2758,7 @@ class Session {
    * @param {Object} [options.params] - URL query parameters
    * @param {Object} [options.headers] - Request headers
    * @param {Object} [options.cookies] - Cookies to send
-   * @param {number} [options.timeout] - Request timeout in seconds
+   * @param {number} [options.timeout] - Request timeout in milliseconds
    * @returns {StreamResponse} - Streaming response for chunked reading
    *
    * Example:
@@ -2794,7 +2794,7 @@ class Session {
       reqOptions.headers = mergedHeaders;
     }
     if (timeout) {
-      reqOptions.timeout = timeout * 1000;
+      reqOptions.timeout = timeout;
     }
     if (allowRedirects !== null && allowRedirects !== undefined) {
       reqOptions.follow_redirects = !!allowRedirects;
@@ -2843,7 +2843,7 @@ class Session {
    * @param {Object} [options.params] - URL query parameters
    * @param {Object} [options.headers] - Request headers
    * @param {Object} [options.cookies] - Cookies to send
-   * @param {number} [options.timeout] - Request timeout in seconds
+   * @param {number} [options.timeout] - Request timeout in milliseconds
    * @returns {StreamResponse} - Streaming response for chunked reading
    */
   postStream(url, options = {}) {
@@ -2885,7 +2885,7 @@ class Session {
       reqOptions.headers = mergedHeaders;
     }
     if (timeout) {
-      reqOptions.timeout = timeout * 1000;
+      reqOptions.timeout = timeout;
     }
     if (allowRedirects !== null && allowRedirects !== undefined) {
       reqOptions.follow_redirects = !!allowRedirects;
