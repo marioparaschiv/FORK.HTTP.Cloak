@@ -778,16 +778,6 @@ function getLibPath() {
     return envPath;
   }
 
-  const packageName = getPlatformPackageName();
-  try {
-    const libPath = require(packageName);
-    if (fs.existsSync(libPath)) {
-      return libPath;
-    }
-  } catch (e) {
-    // Optional dependency not installed
-  }
-
   let archName;
   if (arch === "x64" || arch === "amd64") {
     archName = "amd64";
@@ -821,6 +811,16 @@ function getLibPath() {
     if (fs.existsSync(searchPath)) {
       return searchPath;
     }
+  }
+
+  const packageName = getPlatformPackageName();
+  try {
+    const libPath = require(packageName);
+    if (fs.existsSync(libPath)) {
+      return libPath;
+    }
+  } catch (e) {
+    // Optional dependency not installed
   }
 
   throw new HTTPCloakError(
