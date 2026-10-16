@@ -1,6 +1,6 @@
 {
   "name": "@marioparaschiv/httpcloak-darwin-x64",
-  "version": "1.7.3-rawquic.0",
+  "version": "1.7.3-rawquic.1",
   "description": "HTTPCloak native binary for darwin x64",
   "os": [
     "darwin"
