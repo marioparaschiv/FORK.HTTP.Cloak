@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sardanioss/quic-go/quicvarint"
 	utls "github.com/sardanioss/utls"
 )
 
@@ -262,9 +263,15 @@ func DecodeRawQUICClientHello(field, b64 string, blunt bool) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", field, err)
 	}
-	if !SpecHasQUICTransportParameters(spec) {
+	body, ok := quicTransportParametersBody(spec)
+	if !ok {
 		return nil, fmt.Errorf("%s has no quic_transport_parameters extension, so it was not "+
 			"captured from a QUIC handshake; a TCP capture belongs in tls.raw_client_hello", field)
+	}
+	// HTTP/3 reads the capture's parameter list to decide what it sends, so an
+	// unreadable one is refused here rather than on the first dial.
+	if _, err := decodeQUICTransportParameters(body); err != nil {
+		return nil, fmt.Errorf("%s: quic_transport_parameters: %w", field, err)
 	}
 	return raw, nil
 }
@@ -332,20 +339,96 @@ func ClientHelloSourceOf(p *Preset, customJA3 string) ClientHelloSource {
 // arrives as a GenericExtension carrying the raw id. Matching only the named
 // type would miss every real capture.
 func SpecHasQUICTransportParameters(spec *utls.ClientHelloSpec) bool {
+	_, ok := quicTransportParametersBody(spec)
+	return ok
+}
+
+// quicTransportParametersBody returns the body of a spec's
+// quic_transport_parameters extension, in either of the two shapes described
+// on SpecHasQUICTransportParameters. A named extension that came from a parrot
+// rather than a capture has no body yet, and yields nil with ok true.
+func quicTransportParametersBody(spec *utls.ClientHelloSpec) ([]byte, bool) {
 	if spec == nil {
-		return false
+		return nil, false
 	}
 	for _, ext := range spec.Extensions {
 		switch e := ext.(type) {
 		case *utls.QUICTransportParametersExtension:
-			return true
+			return e.RawData, true
 		case *utls.GenericExtension:
 			if e.Id == quicTransportParametersExtensionID {
-				return true
+				return e.Data, true
 			}
 		}
 	}
-	return false
+	return nil, false
+}
+
+// decodeQUICTransportParameters splits a quic_transport_parameters body into
+// its parameters, keyed by id. Each is a varint id, a varint length and that
+// many bytes of value (RFC 9000 section 18).
+func decodeQUICTransportParameters(body []byte) (map[uint64][]byte, error) {
+	params := make(map[uint64][]byte)
+	for len(body) > 0 {
+		id, n, err := quicvarint.Parse(body)
+		if err != nil {
+			return nil, fmt.Errorf("transport parameter id: %w", err)
+		}
+		body = body[n:]
+
+		length, n, err := quicvarint.Parse(body)
+		if err != nil {
+			return nil, fmt.Errorf("transport parameter 0x%x length: %w", id, err)
+		}
+		body = body[n:]
+
+		if length > uint64(len(body)) {
+			return nil, fmt.Errorf("transport parameter 0x%x claims %d bytes, %d remain", id, length, len(body))
+		}
+		if _, dup := params[id]; dup {
+			return nil, fmt.Errorf("transport parameter 0x%x appears twice", id)
+		}
+		params[id] = body[:length]
+		body = body[length:]
+	}
+	return params, nil
+}
+
+// QUICCaptureTransportParameters returns the transport parameters carried by
+// the capture an HTTP/3 ClientHello is built from, keyed by id. ok is false
+// when HTTP/3 is not built from a capture at all.
+//
+// The captured values never reach the wire as a block: the QUIC layer replaces
+// extension 57 with its own parameters, since some of them are per connection.
+// What the capture does settle is which parameters the client sends, and that
+// is the question a preset with a capture cannot answer from its identity,
+// because the capture is what cleared it.
+//
+// The candidates are taken in ResolveQUICClientHelloSpec's order, so the answer
+// describes the same hello that goes on the wire.
+func QUICCaptureTransportParameters(p *Preset) (map[uint64][]byte, bool, error) {
+	if p == nil {
+		return nil, false, nil
+	}
+	for _, raw := range [][]byte{p.RawQUICClientHello, p.RawClientHello} {
+		if len(raw) == 0 {
+			continue
+		}
+		spec, err := SpecFromRawClientHello(raw, p.RawBluntMimicry, false)
+		if err != nil {
+			return nil, true, fmt.Errorf("parse quic capture: %w", err)
+		}
+		body, isQUIC := quicTransportParametersBody(spec)
+		if !isQUIC {
+			continue
+		}
+		params, err := decodeQUICTransportParameters(body)
+		if err != nil {
+			return nil, true, fmt.Errorf("decode quic_transport_parameters: %w", err)
+		}
+		return params, true, nil
+	}
+	return nil, false, nil
 }
 
 // quicTransportParametersExtensionID is extension 57, quic_transport_parameters

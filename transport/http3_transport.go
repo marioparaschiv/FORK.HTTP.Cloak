@@ -162,8 +162,9 @@ func ResetInitialRTT() {}
 // AdditionalTransportParamsForPreset returns per-connection additional QUIC
 // transport params appropriate for the given preset. For Chrome presets that is
 // version_information (0x11) and google_connection_options (0x3128). For
-// non-Chrome presets (e.g. Firefox) it returns nil so these Chrome-specific
-// params are not sent.
+// non-Chrome presets (e.g. Firefox) it returns an empty map so these
+// Chrome-specific params are not sent. A preset whose HTTP/3 hello is a capture
+// sends whichever of the two the capture carries.
 //
 // The ctx/host/port parameters are unused and retained for API compatibility;
 // they previously drove the initial_rtt probe.
@@ -171,6 +172,18 @@ func AdditionalTransportParamsForPreset(preset *fingerprint.Preset, _ context.Co
 	if preset == nil {
 		return nil
 	}
+
+	captured, fromCapture, err := fingerprint.QUICCaptureTransportParameters(preset)
+	if err != nil {
+		// Load refuses a capture this cannot read, so only a preset assembled
+		// in Go gets here, and its hello fails to resolve on the same bytes.
+		// Nothing the capture cannot vouch for is sent.
+		return map[uint64][]byte{}
+	}
+	if fromCapture {
+		return chromeTransportParamsFromCapture(preset, captured)
+	}
+
 	if !presetIsChromeQUIC(preset) {
 		// Empty, NOT nil. quic-go treats a nil additional-parameter map as "fall
 		// back to the process-global set", and MeasureAndSetInitialRTT writes
@@ -181,6 +194,36 @@ func AdditionalTransportParamsForPreset(preset *fingerprint.Preset, _ context.Co
 		return map[uint64][]byte{}
 	}
 	return BuildChromeTransportParamsFor(preset.H3QUICConnectionOptions())
+}
+
+// chromeTransportParamsFromCapture sends each Chrome parameter the captured
+// hello carries, and no other.
+//
+// Presence is read off the capture, but version_information is still built
+// fresh: its GREASE label is drawn per connection, and replaying the captured
+// one would pin it. google_connection_options takes the preset's
+// quic_connection_options when that is set, and the captured tags otherwise,
+// since Chrome's "ORIG" default is a guess the capture has already answered.
+func chromeTransportParamsFromCapture(preset *fingerprint.Preset, captured map[uint64][]byte) map[uint64][]byte {
+	var connectionOptions []string
+	if preset.H3Config != nil && preset.H3Config.QUICConnectionOptions != nil {
+		connectionOptions = *preset.H3Config.QUICConnectionOptions
+	} else {
+		tags := captured[tpGoogleConnectionOptions]
+		connectionOptions = []string{}
+		for len(tags) >= 4 {
+			connectionOptions = append(connectionOptions, string(tags[:4]))
+			tags = tags[4:]
+		}
+	}
+
+	params := BuildChromeTransportParamsFor(connectionOptions)
+	for id := range params {
+		if _, ok := captured[id]; !ok {
+			delete(params, id)
+		}
+	}
+	return params
 }
 
 // presetIsChromeQUIC reports whether a preset impersonates a Chromium-based
@@ -199,6 +242,11 @@ func AdditionalTransportParamsForPreset(preset *fingerprint.Preset, _ context.Co
 // desktop and Android Chrome presets, and something else (or empty) for
 // Firefox, Safari and the WebKit-based iOS Chrome presets, which really do not
 // send these.
+//
+// A preset whose HTTP/3 hello is a capture never asks. Loading a capture clears
+// the identity it replaces, so this would answer from whatever identity was
+// left, and the capture itself says which parameters the client sends; see
+// chromeTransportParamsFromCapture.
 func presetIsChromeQUIC(preset *fingerprint.Preset) bool {
 	if preset.QUICClientHelloID.Client != "" {
 		return preset.QUICClientHelloID.Client == "Chrome"

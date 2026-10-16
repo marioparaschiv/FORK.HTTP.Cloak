@@ -676,7 +676,9 @@ type H3FingerprintConfig struct {
 	//
 	// The parameter is sent only for Chromium QUIC identities; a Firefox or
 	// WebKit preset carries no google_connection_options at all whatever this
-	// says, which is why describe emits the key only when it is set.
+	// says, which is why describe emits the key only when it is set. A preset
+	// whose HTTP/3 hello is a capture sends it only if the capture carries it,
+	// and nil there means the captured tags rather than ["ORIG"].
 	//
 	// The value is not fixed by Chrome version. Chromium builds it from
 	// features::kQuicOptions, a Finch parameter parsed under kTryQuicByDefault

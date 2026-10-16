@@ -233,7 +233,7 @@ The build step rejects the following combinations:
 - `raw_quic_client_hello` on a preset that uses `ja3`, set here or inherited. Pair it with `raw_client_hello` or `client_hello` instead.
 - `raw_quic_client_hello` with `quic_client_hello` or `quic_psk_client_hello` in the same spec.
 - `raw_psk_client_hello` without `raw_client_hello`, and `raw_quic_psk_client_hello` without `raw_quic_client_hello`.
-- A `raw_quic_client_hello` or `raw_quic_psk_client_hello` with no `quic_transport_parameters` extension. That is a TCP capture and belongs in `raw_client_hello`.
+- A `raw_quic_client_hello` or `raw_quic_psk_client_hello` with no `quic_transport_parameters` extension. That is a TCP capture and belongs in `raw_client_hello`. A `quic_transport_parameters` body that does not decode as a parameter list is refused too.
 - `alpn`, `cert_compression`, `record_size_limit` or `permute_extensions` in a `tls` block without `ja3`, whether the hello comes from `client_hello`, from `based_on`, or from a `raw_client_hello` or `raw_quic_client_hello` (which fix them already; `permute_extensions` is allowed there). They are only read alongside `ja3`, so the build refuses them instead of dropping them. `signature_algorithms` is the exception: on the `client_hello` path it overrides the extension on top of the inherited hello.
 - Any top-level TLS extension field (`signature_algorithms`, `delegated_credential_algorithms`, `alpn`, `cert_compression`, `permute_extensions`, `record_size_limit`, `key_share_curves`) next to a `ja3_extras` block. `ja3_extras` replaces them, so put them inside it.
 
@@ -438,6 +438,12 @@ currently sends `["ORIG"]`, and this is a preset key rather than a constant
 because the value comes from a server-side experiment and can change without a
 Chrome release. An explicitly empty list sends none; omitting the field entirely
 falls back to the default.
+
+When HTTP/3 uses a captured hello (`raw_quic_client_hello`, or a QUIC capture in
+`raw_client_hello`), the capture decides whether `version_information` and the
+connection options are sent at all: each goes out only if the captured
+`quic_transport_parameters` carries it. Omitting this field then sends the
+captured tags rather than `["ORIG"]`.
 
 ## `headers` object
 

@@ -9,15 +9,22 @@ import (
 	utls "github.com/sardanioss/utls"
 )
 
-func rawQUICHello(t *testing.T) []byte {
+// rawHello builds a captured-shape hello from a parrot. transportParams is the
+// quic_transport_parameters body, for a QUIC parrot.
+func rawHello(t *testing.T, id utls.ClientHelloID, transportParams []byte) []byte {
 	t.Helper()
-	spec, err := utls.UTLSIdToSpecWithSeed(utls.HelloChrome_146_QUIC, 1)
+	spec, err := utls.UTLSIdToSpecWithSeed(id, 1)
 	if err != nil {
-		t.Fatalf("build QUIC spec: %v", err)
+		t.Fatalf("build %s spec: %v", id.Str(), err)
+	}
+	for _, ext := range spec.Extensions {
+		if qtp, ok := ext.(*utls.QUICTransportParametersExtension); ok {
+			qtp.RawData = transportParams
+		}
 	}
 	conn := utls.UClient(nil, &utls.Config{ServerName: "example.com", OmitEmptyPsk: true}, utls.HelloCustom)
 	if err := conn.ApplyPreset(&spec); err != nil {
-		t.Fatalf("apply QUIC spec: %v", err)
+		t.Fatalf("apply %s spec: %v", id.Str(), err)
 	}
 	if err := conn.BuildHandshakeState(); err != nil {
 		t.Fatalf("build handshake state: %v", err)
@@ -30,7 +37,7 @@ func rawQUICHello(t *testing.T) []byte {
 // when the preset has a resumption hello to send. A captured QUIC PSK hello
 // has to count, or a raw QUIC preset never resumes however it was written.
 func TestRawQUICPSKCaptureEnablesTheSessionCache(t *testing.T) {
-	quic := base64.StdEncoding.EncodeToString(rawQUICHello(t))
+	quic := base64.StdEncoding.EncodeToString(rawHello(t, utls.HelloChrome_146_QUIC, nil))
 
 	for _, tc := range []struct {
 		name, tls string

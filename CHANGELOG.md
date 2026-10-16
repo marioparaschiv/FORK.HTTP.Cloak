@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The HTTP/3 transport used to attach its session cache, and ask for a resumption hello, only when the preset named a `quic_psk_client_hello`. Both decisions now ask the hello resolver's own question, so `raw_quic_psk_client_hello` is sent whenever a session for the host exists, and a QUIC capture without one does not resume rather than resuming with another client's hello.
 
+  Whether HTTP/3 sends Chrome's `version_information` and `google_connection_options` transport parameters is read off the capture. It used to follow the QUIC identity, which a capture clears, so a preset carrying both captures sent neither even when its captured Chrome hello carried both. Each is now sent exactly when the captured `quic_transport_parameters` has it, and `google_connection_options` takes the captured tags unless `http3.quic_connection_options` is set. A capture whose parameter list does not decode is refused at load.
+
 ## [1.7.3] - 2026-10-14
 
 ### Added
