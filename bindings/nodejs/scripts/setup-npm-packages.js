@@ -32,7 +32,7 @@ for (const platform of PLATFORMS) {
 
   // Create package.json
   const packageJson = {
-    name: `@httpcloak/${platform.name}`,
+    name: `@marioparaschiv/httpcloak-${platform.name}`,
     version: VERSION,
     description: `HTTPCloak native binary for ${platform.os} ${platform.cpu}`,
     os: [platform.os],
@@ -60,13 +60,13 @@ module.exports = path.join(__dirname, "${platform.libName}");
 `;
   fs.writeFileSync(path.join(pkgDir, "lib.js"), libJs);
 
-  console.log(`Created: @httpcloak/${platform.name}`);
+  console.log(`Created: @marioparaschiv/httpcloak-${platform.name}`);
 }
 
 // Create optionalDependencies for main package
 const optionalDeps = {};
 for (const platform of PLATFORMS) {
-  optionalDeps[`@httpcloak/${platform.name}`] = VERSION;
+  optionalDeps[`@marioparaschiv/httpcloak-${platform.name}`] = VERSION;
 }
 
 console.log("\nAdd to main package.json optionalDependencies:");

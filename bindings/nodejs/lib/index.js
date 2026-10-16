@@ -841,7 +841,7 @@ function getPlatformPackageName() {
     archName = arch;
   }
 
-  return `@httpcloak/${platName}-${archName}`;
+  return `@marioparaschiv/httpcloak-${platName}-${archName}`;
 }
 
 // nativeLibName is the file the platform's build is published under.
