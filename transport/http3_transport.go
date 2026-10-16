@@ -273,8 +273,6 @@ type HTTP3Transport struct {
 	// resolution fails. Dials go through getSpecForHost, which builds a fresh
 	// one per connection; see FreshShuffleSeed for why that matters.
 	cachedClientHelloSpec *utls.ClientHelloSpec
-	// PSK variant of the spec for session resumption (includes pre_shared_key extension)
-	cachedClientHelloSpecPSK *utls.ClientHelloSpec
 
 	// Separate cached spec for inner MASQUE connections (not shared with outer)
 	cachedClientHelloSpecInner *utls.ClientHelloSpec
@@ -471,7 +469,7 @@ func (t *HTTP3Transport) getSpecForHost(host string) *utls.ClientHelloSpec {
 // next time a source cannot be used it is visible rather than inferred from a
 // fingerprint that looks wrong.
 func (t *HTTP3Transport) resolveQUICSpec(host string) (*utls.ClientHelloSpec, error) {
-	wantPSK := t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host)
+	wantPSK := fingerprint.HasQUICPSKVariant(t.preset) && t.hasSessionForHost(host)
 	spec, _, err := fingerprint.ResolveQUICClientHelloSpec(t.preset, wantPSK, fingerprint.FreshShuffleSeed())
 	return spec, err
 }
@@ -556,16 +554,6 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		}
 	}
 
-	// Also cache the PSK spec for session resumption (includes pre_shared_key extension)
-	// Chrome uses a different TLS extension set when resuming with PSK
-	if preset.QUICPSKClientHelloID.Client != "" {
-		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, fingerprint.FreshShuffleSeed()); err == nil {
-			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
-			fingerprint.ApplyQUICTrustAnchors(&pskSpec.Extensions, preset)
-			t.cachedClientHelloSpecPSK = &pskSpec
-		}
-	}
-
 	// Determine key log writer - config override or global
 	var keyLogWriter io.Writer
 	if config != nil && config.KeyLogWriter != nil {
@@ -584,7 +572,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		KeyLogWriter:       keyLogWriter,
 	}
 	t.tlsVerify.Apply(t.tlsConfig)
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
 
@@ -686,15 +674,6 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		}
 	}
 
-	// Also cache the PSK spec for session resumption (includes pre_shared_key extension)
-	if preset.QUICPSKClientHelloID.Client != "" {
-		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, fingerprint.FreshShuffleSeed()); err == nil {
-			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
-			fingerprint.ApplyQUICTrustAnchors(&pskSpec.Extensions, preset)
-			t.cachedClientHelloSpecPSK = &pskSpec
-		}
-	}
-
 	// Determine key log writer - config override or global
 	var keyLogWriter io.Writer
 	if config != nil && config.KeyLogWriter != nil {
@@ -713,7 +692,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		KeyLogWriter:       keyLogWriter,
 	}
 	t.tlsVerify.Apply(t.tlsConfig)
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
 
@@ -814,12 +793,6 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// Also cache PSK specs for session resumption (includes pre_shared_key extension)
 	if preset.QUICPSKClientHelloID.Client != "" {
-		// Outer PSK spec
-		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, fingerprint.FreshShuffleSeed()); err == nil {
-			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
-			fingerprint.ApplyQUICTrustAnchors(&pskSpec.Extensions, preset)
-			t.cachedClientHelloSpecPSK = &pskSpec
-		}
 		// Inner PSK spec for MASQUE connections
 		if innerPskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, fingerprint.FreshShuffleSeed()); err == nil {
 			fingerprint.ApplySignatureAlgorithms(innerPskSpec.Extensions, preset.QUICSignatureAlgorithms)
@@ -846,7 +819,7 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 		KeyLogWriter:       keyLogWriter,
 	}
 	t.tlsVerify.Apply(t.tlsConfig)
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
 
@@ -927,7 +900,7 @@ func (t *HTTP3Transport) dialQUICWithMASQUE(ctx context.Context, addr string, tl
 	tlsCfgCopy.ServerName = host
 	// Clone() doesn't preserve ClientSessionCache, restore it for session resumption
 	// Only if we have PSK spec to prevent TOCTOU race
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		tlsCfgCopy.ClientSessionCache = t.sessionCache
 	}
 
@@ -1086,7 +1059,7 @@ func (t *HTTP3Transport) dialQUICWithProxy(ctx context.Context, addr string, tls
 	// Clone TLS config — ServerName is the actual host (not connectHost)
 	tlsCfgCopy := t.tlsConfig.Clone()
 	tlsCfgCopy.ServerName = host
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		tlsCfgCopy.ClientSessionCache = t.sessionCache
 	}
 
@@ -1569,7 +1542,7 @@ func (t *HTTP3Transport) dialQUIC(ctx context.Context, addr string, tlsCfg *tls.
 	tlsCfgCopy.ServerName = host
 	// Clone() doesn't preserve ClientSessionCache, restore it for session resumption
 	// Only if we have PSK spec to prevent TOCTOU race
-	if t.cachedClientHelloSpecPSK != nil {
+	if fingerprint.HasQUICPSKVariant(t.preset) {
 		tlsCfgCopy.ClientSessionCache = t.sessionCache
 	}
 

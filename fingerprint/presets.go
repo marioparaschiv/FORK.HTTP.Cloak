@@ -109,6 +109,12 @@ type Preset struct {
 	RawPSKClientHello []byte
 	RawBluntMimicry   bool
 
+	// RawQUICClientHello is a ClientHello captured from a QUIC handshake, kept
+	// apart from RawClientHello so one preset can replay a client on both
+	// transports. RawQUICPSKClientHello is its resumption counterpart.
+	RawQUICClientHello    []byte
+	RawQUICPSKClientHello []byte
+
 	// RawPermuteExtensions shuffles a captured hello's extension order per
 	// connection, the way Chromium does.
 	//

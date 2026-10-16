@@ -15,6 +15,7 @@ const (
 	SourceClientHelloID ClientHelloSource = iota
 	SourceJA3
 	SourceRaw
+	SourceRawQUIC
 )
 
 func (s ClientHelloSource) String() string {
@@ -23,6 +24,8 @@ func (s ClientHelloSource) String() string {
 		return "ja3"
 	case SourceRaw:
 		return "raw_client_hello"
+	case SourceRawQUIC:
+		return "raw_quic_client_hello"
 	default:
 		return "client_hello"
 	}
@@ -75,13 +78,7 @@ func ResolveClientHelloSpec(
 	}
 
 	if len(p.RawClientHello) > 0 {
-		raw := p.RawClientHello
-		realPSK := false
-		if wantPSK && len(p.RawPSKClientHello) > 0 {
-			raw = p.RawPSKClientHello
-			realPSK = true
-		}
-		spec, err := SpecFromRawClientHello(raw, p.RawBluntMimicry, realPSK)
+		spec, err := specFromCapture(p.RawClientHello, p.RawPSKClientHello, wantPSK, p.RawBluntMimicry)
 		if err != nil {
 			return nil, SourceRaw, err
 		}
@@ -178,6 +175,28 @@ func HasPSKVariant(p *Preset, customJA3 string) bool {
 	return p.PSKClientHelloID.Client != ""
 }
 
+// HasQUICPSKVariant reports whether a QUIC handshake has a resumption-shaped
+// hello to send: the captured one when the preset carries a QUIC capture, the
+// named QUIC PSK id otherwise.
+func HasQUICPSKVariant(p *Preset) bool {
+	if p == nil {
+		return false
+	}
+	if len(p.RawQUICClientHello) > 0 {
+		return len(p.RawQUICPSKClientHello) > 0
+	}
+	return p.QUICPSKClientHelloID.Client != ""
+}
+
+// specFromCapture parses the resumption capture when one is wanted and present,
+// and the fresh capture otherwise.
+func specFromCapture(raw, pskRaw []byte, wantPSK, blunt bool) (*utls.ClientHelloSpec, error) {
+	if wantPSK && len(pskRaw) > 0 {
+		return SpecFromRawClientHello(pskRaw, blunt, true)
+	}
+	return SpecFromRawClientHello(raw, blunt, false)
+}
+
 // SpecFromRawClientHello turns captured ClientHello bytes into a spec.
 //
 // blunt passes unknown extensions through verbatim. Without it uTLS rejects
@@ -227,6 +246,25 @@ func DecodeRawClientHello(field, b64 string, blunt bool) ([]byte, error) {
 				"extensions through verbatim; some clients (curl among them) need it", field, err)
 		}
 		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	return raw, nil
+}
+
+// DecodeRawQUICClientHello is DecodeRawClientHello for a field that must hold a
+// QUIC capture. A TCP hello there would be sent on QUIC with no transport
+// parameters, so it is refused at load rather than on the first HTTP/3 dial.
+func DecodeRawQUICClientHello(field, b64 string, blunt bool) ([]byte, error) {
+	raw, err := DecodeRawClientHello(field, b64, blunt)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := SpecFromRawClientHello(raw, blunt, false)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if !SpecHasQUICTransportParameters(spec) {
+		return nil, fmt.Errorf("%s has no quic_transport_parameters extension, so it was not "+
+			"captured from a QUIC handshake; a TCP capture belongs in tls.raw_client_hello", field)
 	}
 	return raw, nil
 }
@@ -324,9 +362,10 @@ const quicTransportParametersExtensionID uint16 = 57
 // parameters, which is not the configured fingerprint and is not a valid QUIC
 // hello either.
 //
-// Precedence, highest first, and each source is skipped unless it actually
-// describes a QUIC handshake:
+// Precedence, highest first, and each source after the first is skipped unless
+// it actually describes a QUIC handshake:
 //
+//	preset.RawQUICClientHello
 //	preset.RawClientHello   when it carries quic_transport_parameters
 //	preset.JA3              when it carries quic_transport_parameters
 //	preset.QUICClientHelloID
@@ -344,14 +383,19 @@ func ResolveQUICClientHelloSpec(p *Preset, wantPSK bool, seed int64) (*utls.Clie
 		return nil, SourceClientHelloID, fmt.Errorf("nil preset")
 	}
 
-	if len(p.RawClientHello) > 0 {
-		raw := p.RawClientHello
-		realPSK := false
-		if wantPSK && len(p.RawPSKClientHello) > 0 {
-			raw = p.RawPSKClientHello
-			realPSK = true
+	if len(p.RawQUICClientHello) > 0 {
+		spec, err := specFromCapture(p.RawQUICClientHello, p.RawQUICPSKClientHello, wantPSK, p.RawBluntMimicry)
+		if err != nil {
+			return nil, SourceRawQUIC, fmt.Errorf("parse raw quic client hello: %w", err)
 		}
-		spec, err := SpecFromRawClientHello(raw, p.RawBluntMimicry, realPSK)
+		if p.RawPermuteExtensions {
+			spec.Extensions = utls.ShuffleChromeTLSExtensions(spec.Extensions)
+		}
+		return spec, SourceRawQUIC, nil
+	}
+
+	if len(p.RawClientHello) > 0 {
+		spec, err := specFromCapture(p.RawClientHello, p.RawPSKClientHello, wantPSK, p.RawBluntMimicry)
 		if err != nil {
 			return nil, SourceRaw, fmt.Errorf("parse raw client hello for quic: %w", err)
 		}
