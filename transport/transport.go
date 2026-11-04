@@ -2666,10 +2666,11 @@ func (t *Transport) applyH2ConnLimits(h2 *HTTP2Transport) {
 
 // Preconnect opens the HTTP/2 connection a request to host:port would use,
 // through the configured proxy, without sending a request. With a usable
-// connection already open it returns at once, and one the peer closed is
-// replaced. Only HTTP/2 is opened: a transport forced onto HTTP/1.1 or HTTP/3
-// is refused, since nothing would use the connection.
-func (t *Transport) Preconnect(ctx context.Context, host, port string) error {
+// connection already open it returns at once, unless that one has sat idle for
+// replaceIdle (zero: never), and one the peer closed is replaced. Only HTTP/2
+// is opened: a transport forced onto HTTP/1.1 or HTTP/3 is refused, since
+// nothing would use the connection.
+func (t *Transport) Preconnect(ctx context.Context, host, port string, replaceIdle time.Duration) error {
 	snap := t.snapshot()
 	if snap.tcpProxyError != nil {
 		return snap.tcpProxyError
@@ -2677,12 +2678,18 @@ func (t *Transport) Preconnect(ctx context.Context, host, port string) error {
 	if snap.protocol == ProtocolHTTP1 || snap.protocol == ProtocolHTTP3 {
 		return fmt.Errorf("preconnect: the transport is forced onto %v, not HTTP/2", snap.protocol)
 	}
-	err := snap.h2.Connect(ctx, host, port)
+	err := snap.h2.Preconnect(ctx, host, port, replaceIdle)
 	var alpnErr *ALPNMismatchError
 	if errors.As(err, &alpnErr) && alpnErr.TLSConn != nil {
 		alpnErr.TLSConn.Close()
 	}
 	return err
+}
+
+// ConnPath reports the pooled HTTP/2 connection a request to host:port would go
+// out on; ok is false when there is none.
+func (t *Transport) ConnPath(host, port string) (ConnPath, bool) {
+	return t.snapshot().h2.ConnPath(host, port)
 }
 
 func (t *Transport) GetHTTP2Transport() *HTTP2Transport {

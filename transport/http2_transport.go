@@ -1639,6 +1639,15 @@ func (t *HTTP2Transport) getConnectHost(requestHost string) string {
 // Connect establishes a connection to the host without making a request.
 // This is used for protocol racing - the first protocol to connect wins.
 func (t *HTTP2Transport) Connect(ctx context.Context, host, port string) error {
+	return t.Preconnect(ctx, host, port, 0)
+}
+
+// Preconnect is Connect that also replaces a usable connection once it has sat
+// idle for replaceIdle, so a peer that drops idle connections never gets to.
+// The replacement is dialled while the old connection still serves requests,
+// and the old one is retired only once the new one is pooled. Zero never
+// replaces a usable connection.
+func (t *HTTP2Transport) Preconnect(ctx context.Context, host, port string, replaceIdle time.Duration) error {
 	// Use connect host for pool key (domain fronting: multiple request hosts share one connection)
 	connectHost := t.getConnectHost(host)
 	key := net.JoinHostPort(connectHost, port)
@@ -1652,8 +1661,13 @@ func (t *HTTP2Transport) Connect(ctx context.Context, host, port string) error {
 	existingConn, exists := t.conns[key]
 	t.connsMu.RUnlock()
 
+	// The usable connection this dial replaces for having sat idle too long.
+	var stale *persistentConn
 	if exists && t.isConnUsable(existingConn) {
-		return nil // Already connected
+		if replaceIdle <= 0 || existingConn.idleFor() < replaceIdle {
+			return nil // Already connected
+		}
+		stale = existingConn
 	}
 
 	// Create new connection
@@ -1673,7 +1687,7 @@ func (t *HTTP2Transport) Connect(ctx context.Context, host, port string) error {
 	if oldConn, exists := t.conns[key]; exists {
 		// Close the old one if not usable. Deferred, because "not usable for a
 		// new request" does not mean nothing is streaming on it.
-		if !t.isConnUsable(oldConn) {
+		if oldConn == stale || !t.isConnUsable(oldConn) {
 			go t.retire(oldConn)
 		} else {
 			// Old one is still good, close the new one we just created
@@ -1686,4 +1700,51 @@ func (t *HTTP2Transport) Connect(ctx context.Context, host, port string) error {
 	t.connsMu.Unlock()
 
 	return nil
+}
+
+// idleFor is how long the connection has gone without a request on it.
+func (c *persistentConn) idleFor() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inFlight > 0 {
+		return 0
+	}
+	return time.Since(c.lastUsedAt)
+}
+
+// ConnPath describes the pooled connection a request to a host would go out
+// on, read without sending anything on it.
+type ConnPath struct {
+	// SocketRTT is the kernel's smoothed round trip on the connection's TCP
+	// socket, which ends at the proxy when there is one. Zero where the platform
+	// does not report it.
+	SocketRTT time.Duration
+	// TLSHandshake is how long the connection's TLS handshake took: one round
+	// trip to the origin's edge, through the proxy when there is one.
+	TLSHandshake time.Duration
+	// Age is how long ago the connection was opened, so how old TLSHandshake is.
+	Age time.Duration
+}
+
+// ConnPath reports the usable pooled connection serving host:port; ok is false
+// when there is none.
+func (t *HTTP2Transport) ConnPath(host, port string) (path ConnPath, ok bool) {
+	key := net.JoinHostPort(t.getConnectHost(host), port)
+	t.connsMu.RLock()
+	conn, exists := t.conns[key]
+	t.connsMu.RUnlock()
+	if !exists || !t.isConnUsable(conn) {
+		return ConnPath{}, false
+	}
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	path = ConnPath{
+		TLSHandshake: time.Duration(conn.tlsMs * float64(time.Millisecond)),
+		Age:          time.Since(conn.createdAt),
+	}
+	if conn.tlsConn != nil {
+		path.SocketRTT = socketRTT(conn.tlsConn.NetConn())
+	}
+	return path, true
 }

@@ -1407,29 +1407,39 @@ func httpcloak_session_warmup(handle C.int64_t, url *C.char, timeoutMs C.int64_t
 	return nil
 }
 
+// httpsHostPort splits an https URL into the host and port a connection to it uses.
+func httpsHostPort(raw string) (host, port string, err error) {
+	parsed, err := neturl.Parse(raw)
+	if err != nil {
+		return "", "", err
+	}
+	if parsed.Scheme != "https" {
+		return "", "", fmt.Errorf("an https URL is needed, got %q", parsed.Scheme)
+	}
+	port = parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+	return parsed.Hostname(), port, nil
+}
+
 // httpcloak_session_preconnect opens the HTTP/2 connection a request to url
 // would use, through the session's proxy, without sending a request. It returns
-// at once when a usable connection is already open, and replaces one the peer
+// at once when a usable connection is already open, unless that one has gone
+// replaceIdleMs without a request (zero: never), and replaces one the peer
 // closed. Returns NULL on success, or an error JSON.
 //
 //export httpcloak_session_preconnect
-func httpcloak_session_preconnect(handle C.int64_t, url *C.char, timeoutMs C.int64_t) (hcRet *C.char) {
+func httpcloak_session_preconnect(handle C.int64_t, url *C.char, replaceIdleMs C.int64_t, timeoutMs C.int64_t) (hcRet *C.char) {
 	defer guardCharP("httpcloak_session_preconnect", &hcRet)
 	session := getSession(handle)
 	if session == nil {
 		return makeErrorJSON(ErrInvalidSession)
 	}
 
-	parsed, err := neturl.Parse(C.GoString(url))
+	host, port, err := httpsHostPort(C.GoString(url))
 	if err != nil {
 		return makeErrorJSON(err)
-	}
-	if parsed.Scheme != "https" {
-		return makeErrorJSON(fmt.Errorf("preconnect needs an https URL, got %q", parsed.Scheme))
-	}
-	port := parsed.Port()
-	if port == "" {
-		port = "443"
 	}
 
 	timeout := 30 * time.Second
@@ -1439,11 +1449,43 @@ func httpcloak_session_preconnect(handle C.int64_t, url *C.char, timeoutMs C.int
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if err := session.GetTransport().Preconnect(ctx, parsed.Hostname(), port); err != nil {
+	replaceIdle := time.Duration(replaceIdleMs) * time.Millisecond
+	if err := session.GetTransport().Preconnect(ctx, host, port, replaceIdle); err != nil {
 		return makeErrorJSON(err)
 	}
 
 	return nil
+}
+
+// httpcloak_session_conn_path describes the pooled HTTP/2 connection a request
+// to url would go out on, without sending anything on it:
+// {"socket_rtt_us", "tls_handshake_us", "age_ms"}, or an error JSON when the
+// session holds no usable connection for it.
+//
+//export httpcloak_session_conn_path
+func httpcloak_session_conn_path(handle C.int64_t, url *C.char) (hcRet *C.char) {
+	defer guardCharP("httpcloak_session_conn_path", &hcRet)
+	session := getSession(handle)
+	if session == nil {
+		return makeErrorJSON(ErrInvalidSession)
+	}
+
+	host, port, err := httpsHostPort(C.GoString(url))
+	if err != nil {
+		return makeErrorJSON(err)
+	}
+
+	path, ok := session.GetTransport().ConnPath(host, port)
+	if !ok {
+		return makeErrorJSON(fmt.Errorf("no open connection to %s:%s", host, port))
+	}
+
+	data, _ := json.Marshal(map[string]int64{
+		"socket_rtt_us":    path.SocketRTT.Microseconds(),
+		"tls_handshake_us": path.TLSHandshake.Microseconds(),
+		"age_ms":           path.Age.Milliseconds(),
+	})
+	return C.CString(string(data))
 }
 
 // setLastError records why an int64-returning entry point returned -1.

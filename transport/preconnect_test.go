@@ -9,13 +9,18 @@ import (
 
 func preconnect(t *testing.T, tr *Transport, s *h2Server) {
 	t.Helper()
+	preconnectReplacing(t, tr, s, 0)
+}
+
+func preconnectReplacing(t *testing.T, tr *Transport, s *h2Server, replaceIdle time.Duration) {
+	t.Helper()
 	host, port, err := net.SplitHostPort(s.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := tr.Preconnect(ctx, host, port); err != nil {
+	if err := tr.Preconnect(ctx, host, port, replaceIdle); err != nil {
 		t.Fatalf("Preconnect: %v\n%s", err, s.dump())
 	}
 }
@@ -90,6 +95,56 @@ func TestH2ConnLimitsKeepAnIdleConn(t *testing.T) {
 				t.Fatalf("server saw %d connections, want %d", n, tc.conns)
 			}
 		})
+	}
+}
+
+// A usable connection idle past replaceIdle is replaced, and one used since is
+// kept.
+func TestPreconnectReplacesAnIdleConn(t *testing.T) {
+	s := startH2Server(t, h2Config{})
+	tr := retryTransport(t)
+	tr.SetH2ConnLimits(time.Hour, time.Hour)
+
+	preconnect(t, tr, s)
+	preconnectReplacing(t, tr, s, time.Minute)
+	if n := s.connCount(); n != 1 {
+		t.Fatalf("server saw %d connections, want 1: the connection was not idle yet", n)
+	}
+
+	conn := pooled(t, tr, s)
+	conn.mu.Lock()
+	conn.lastUsedAt = conn.lastUsedAt.Add(-2 * time.Minute)
+	conn.mu.Unlock()
+
+	preconnectReplacing(t, tr, s, time.Minute)
+	if n := s.connCount(); n != 2 {
+		t.Fatalf("server saw %d connections, want a second one replacing the idle", n)
+	}
+	if pooled(t, tr, s) == conn {
+		t.Fatal("the idle connection is still the pooled one")
+	}
+}
+
+// ConnPath describes the pooled connection, and nothing without one.
+func TestConnPathReadsThePooledConn(t *testing.T) {
+	s := startH2Server(t, h2Config{})
+	tr := retryTransport(t)
+	host, port, _ := net.SplitHostPort(s.addr)
+
+	if _, ok := tr.ConnPath(host, port); ok {
+		t.Fatal("ConnPath reported a connection before any was opened")
+	}
+
+	preconnect(t, tr, s)
+	path, ok := tr.ConnPath(host, port)
+	if !ok {
+		t.Fatal("ConnPath found no connection after a preconnect")
+	}
+	if path.TLSHandshake <= 0 || path.SocketRTT <= 0 {
+		t.Fatalf("path = %+v, want a measured TLS handshake and socket RTT", path)
+	}
+	if n := len(s.attempts()); n != 0 {
+		t.Fatalf("ConnPath sent %d requests, want none", n)
 	}
 }
 
