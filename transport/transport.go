@@ -606,6 +606,12 @@ type Transport struct {
 	// SetDisableHTTP3. Guarded by fieldsMu.
 	disableH3 bool
 
+	// h2MaxIdle and h2MaxAge are the HTTP/2 connection limits set by
+	// SetH2ConnLimits, carried onto the H2 transport SetProxy/SetPreset rebuild.
+	// Zero keeps the transport's default. Guarded by fieldsMu.
+	h2MaxIdle time.Duration
+	h2MaxAge  time.Duration
+
 	// presetWire caches the request-invariant part of applyPresetHeaders for
 	// the current preset. It is its own synchronisation and is not guarded by
 	// fieldsMu: readers validate the entry against the preset they snapshot,
@@ -963,6 +969,7 @@ func (t *Transport) SetProxy(proxy *ProxyConfig) {
 	// TLS, etc.) on H1/H2.
 	newH1 := NewHTTP1TransportWithConfig(preset, t.dnsCache, routing.tcpProxy, t.config)
 	newH2 := NewHTTP2TransportWithConfig(preset, t.dnsCache, routing.tcpProxy, t.config)
+	t.applyH2ConnLimits(newH2)
 
 	// Recreate HTTP/3 - with proxy support if applicable. Keyed off the UDP proxy
 	// (UDPProxy, else the unified URL), so a split TCP/UDP config still gets H3.
@@ -1060,6 +1067,7 @@ func (t *Transport) SetPreset(presetName string) {
 	// Build outside the lock (construction + old-transport Close can block).
 	newH1 := NewHTTP1TransportWithConfig(preset, t.dnsCache, routing.tcpProxy, t.config)
 	newH2 := NewHTTP2TransportWithConfig(preset, t.dnsCache, routing.tcpProxy, t.config)
+	t.applyH2ConnLimits(newH2)
 
 	// Recreate HTTP/3 - with proxy support if applicable.
 	var newH3 *HTTP3Transport
@@ -2637,6 +2645,46 @@ func (t *Transport) GetHTTP1Transport() *HTTP1Transport {
 }
 
 // GetHTTP2Transport returns the HTTP/2 transport for TLS session cache access
+// SetH2ConnLimits sets how long a pooled HTTP/2 connection may sit idle, and how
+// old it may get, before it is no longer handed out. Zero keeps the default
+// (90s idle, 5m age). Call it before the first request.
+func (t *Transport) SetH2ConnLimits(maxIdle, maxAge time.Duration) {
+	t.fieldsMu.Lock()
+	defer t.fieldsMu.Unlock()
+	t.h2MaxIdle, t.h2MaxAge = maxIdle, maxAge
+	t.h2Transport.SetConnLimits(maxIdle, maxAge)
+}
+
+// applyH2ConnLimits carries the SetH2ConnLimits values onto a rebuilt, not yet
+// published, H2 transport.
+func (t *Transport) applyH2ConnLimits(h2 *HTTP2Transport) {
+	t.fieldsMu.RLock()
+	maxIdle, maxAge := t.h2MaxIdle, t.h2MaxAge
+	t.fieldsMu.RUnlock()
+	h2.SetConnLimits(maxIdle, maxAge)
+}
+
+// Preconnect opens the HTTP/2 connection a request to host:port would use,
+// through the configured proxy, without sending a request. With a usable
+// connection already open it returns at once, and one the peer closed is
+// replaced. Only HTTP/2 is opened: a transport forced onto HTTP/1.1 or HTTP/3
+// is refused, since nothing would use the connection.
+func (t *Transport) Preconnect(ctx context.Context, host, port string) error {
+	snap := t.snapshot()
+	if snap.tcpProxyError != nil {
+		return snap.tcpProxyError
+	}
+	if snap.protocol == ProtocolHTTP1 || snap.protocol == ProtocolHTTP3 {
+		return fmt.Errorf("preconnect: the transport is forced onto %v, not HTTP/2", snap.protocol)
+	}
+	err := snap.h2.Connect(ctx, host, port)
+	var alpnErr *ALPNMismatchError
+	if errors.As(err, &alpnErr) && alpnErr.TLSConn != nil {
+		alpnErr.TLSConn.Close()
+	}
+	return err
+}
+
 func (t *Transport) GetHTTP2Transport() *HTTP2Transport {
 	t.fieldsMu.RLock()
 	defer t.fieldsMu.RUnlock()

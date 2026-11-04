@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	neturl "net/url"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -291,6 +292,8 @@ type SessionConfig struct {
 	ECHConfigDomain               string                 `json:"ech_config_domain,omitempty"`                 // Domain to fetch ECH config from
 	TLSOnly                       bool                   `json:"tls_only,omitempty"`                          // TLS-only mode: skip preset headers, set all manually
 	QuicIdleTimeout               int                    `json:"quic_idle_timeout,omitempty"`                 // QUIC idle timeout in seconds (default: 30)
+	H2MaxIdleTime                 int                    `json:"h2_max_idle_time,omitempty"`                  // Seconds a pooled HTTP/2 connection may sit idle before it is dropped (default: 90)
+	H2MaxConnAge                  int                    `json:"h2_max_conn_age,omitempty"`                   // Seconds a pooled HTTP/2 connection may live before it is dropped (default: 300)
 	LocalAddress                  string                 `json:"local_address,omitempty"`                     // Local IP to bind outgoing connections (IPv6 rotation)
 	KeyLogFile                    string                 `json:"key_log_file,omitempty"`                      // Path to write TLS key log for Wireshark decryption
 	DisableECH                    bool                   `json:"disable_ech,omitempty"`                       // Disable ECH lookup for faster first request
@@ -1321,6 +1324,12 @@ func httpcloak_session_new(configJSON *C.char) (hcRet C.int64_t) {
 	}
 
 	session := httpcloak.NewSession(config.Preset, opts...)
+	if config.H2MaxIdleTime > 0 || config.H2MaxConnAge > 0 {
+		session.GetTransport().SetH2ConnLimits(
+			time.Duration(config.H2MaxIdleTime)*time.Second,
+			time.Duration(config.H2MaxConnAge)*time.Second,
+		)
+	}
 
 	sessionMu.Lock()
 	sessionCounter++
@@ -1392,6 +1401,45 @@ func httpcloak_session_warmup(handle C.int64_t, url *C.char, timeoutMs C.int64_t
 	defer cancel()
 
 	if err := session.Warmup(ctx, urlStr); err != nil {
+		return makeErrorJSON(err)
+	}
+
+	return nil
+}
+
+// httpcloak_session_preconnect opens the HTTP/2 connection a request to url
+// would use, through the session's proxy, without sending a request. It returns
+// at once when a usable connection is already open, and replaces one the peer
+// closed. Returns NULL on success, or an error JSON.
+//
+//export httpcloak_session_preconnect
+func httpcloak_session_preconnect(handle C.int64_t, url *C.char, timeoutMs C.int64_t) (hcRet *C.char) {
+	defer guardCharP("httpcloak_session_preconnect", &hcRet)
+	session := getSession(handle)
+	if session == nil {
+		return makeErrorJSON(ErrInvalidSession)
+	}
+
+	parsed, err := neturl.Parse(C.GoString(url))
+	if err != nil {
+		return makeErrorJSON(err)
+	}
+	if parsed.Scheme != "https" {
+		return makeErrorJSON(fmt.Errorf("preconnect needs an https URL, got %q", parsed.Scheme))
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "443"
+	}
+
+	timeout := 30 * time.Second
+	if timeoutMs > 0 {
+		timeout = time.Duration(timeoutMs) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := session.GetTransport().Preconnect(ctx, parsed.Hostname(), port); err != nil {
 		return makeErrorJSON(err)
 	}
 

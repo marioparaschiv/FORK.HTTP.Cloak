@@ -641,7 +641,21 @@ func (t *HTTP2Transport) isConnUsable(conn *persistentConn) bool {
 		return false
 	}
 
-	return true
+	// The peer closed it or sent GOAWAY: handing it out would only fail the
+	// request and force a retry on a fresh dial.
+	return !connClosing(conn)
+}
+
+// SetConnLimits sets how long a pooled connection may sit idle, and how old it
+// may get, before it is no longer handed out. Zero keeps the current limit. Call
+// it before the transport serves a request: the limits are read without a lock.
+func (t *HTTP2Transport) SetConnLimits(maxIdle, maxAge time.Duration) {
+	if maxIdle > 0 {
+		t.maxIdleTime = maxIdle
+	}
+	if maxAge > 0 {
+		t.maxConnAge = maxAge
+	}
 }
 
 // isConnDestroyable reports whether a connection can be closed right now.
